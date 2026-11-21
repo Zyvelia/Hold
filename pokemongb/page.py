@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import time
+import zipfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -30,8 +31,10 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
+    QProgressDialog,
     QScrollArea,
     QSizePolicy,
     QSlider,
@@ -53,6 +56,7 @@ from pokemongb.cart import (
     prepare_3ds,
     prepare_switch,
     rom_title,
+    ROM_SUFFIXES,
     save_key,
     switch_save_key,
     switch_title,
@@ -61,7 +65,8 @@ from pokemongb.controls import BY_ACTION, LEFT_STICK_KINDS, RIGHT_STICK_KINDS, C
 import pokemongb.gamepad as gamepad
 from pokemongb.gamepad import EMPTY, Pad, read_players
 from pokemongb.gba import CoreError, open_core as open_gba
-from pokemongb.library import Library
+from pokemongb.library import Library, game_id
+from pokemongb.local_link import LocalLinkDialog, battery_paths, read_battery, write_battery
 from pokemongb.shelf import CheatSearchDialog, GameSettings, Shelf
 from pokemongb.gba import pack_state as pack_gba_state
 from pokemongb.gba import unpack_state as unpack_gba_state
@@ -75,14 +80,14 @@ from pokemongb.nds import pack_state as pack_nds_state
 from pokemongb.nds import unpack_state as unpack_nds_state
 from pokemongb.netplay import NET_ACTIONS, Beacon, Link, Relay, discover, pack_input, unpack_input
 from pokemongb.patch import apply_patch
-from pokemongb.picture import adjust, blend, screens_top_large
+from pokemongb.picture import adjust, blend, gb_picture, screens_top_large
 from pokemongb.soundfx import AudioDelay, peak_level, scale_pcm, tone_pcm, wav_header
 from pokemongb.netplay import _full_packet as _full_net
 from pokemongb.switch import open_core as open_switch
 from pokemongb.switch import pack_state as pack_switch_state
 from pokemongb.switch import unpack_state as unpack_switch_state
 from pokemongb.system import GameBoy
-from pokemongb.systems import BY_ID
+from pokemongb.systems import BY_ID, BY_SUFFIX
 from pokemongb.systems import extra_globs
 from pokemongb.systems import cores_dir
 from pokemongb.systems import module_dir
@@ -676,6 +681,14 @@ class PokemonGBPage(QWidget):
 
         bar = _FlowBar()
         self.open_btn = self._button("Open ROM", self._open)
+        self.scan_btn = QPushButton("Scan ROM folder")
+        self.scan_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        scan_menu = QMenu(self.scan_btn)
+        self.rescan_action = scan_menu.addAction("Rescan saved folder", self._rescan_rom_folder)
+        self.rescan_action.setEnabled(bool(self._rom_folder))
+        scan_menu.addAction("Choose folder…", self._choose_rom_folder)
+        self.scan_btn.setMenu(scan_menu)
+        self.local_link_btn = self._button("Local Game Boy link", self._open_local_link)
         self.bios_btn = self._button("Add BIOS", self._add_bios)
         self.bios_btn.setObjectName("BiosButton")
         self.library_btn = self._button("Library", self._toggle_library)
@@ -759,7 +772,8 @@ class PokemonGBPage(QWidget):
         for widget in (
             self.open_btn, self.library_btn, self.pause_btn, self.reset_btn,
             self.states_btn, self.shot_btn, self.full_btn,
-            self.refresh_btn, self.favorites_btn, self.bios_manager_btn, self.more_btn,
+            self.scan_btn, self.local_link_btn, self.refresh_btn, self.favorites_btn,
+            self.bios_manager_btn, self.more_btn,
         ):
             bar.add(widget)
         self.toolbar = bar
@@ -859,7 +873,8 @@ class PokemonGBPage(QWidget):
     def _sync_toolbar_mode(self) -> None:
         """Show library actions in Library and gameplay actions in Playing."""
         library = self.stack.currentWidget() is self.shelf
-        for widget in (self.refresh_btn, self.favorites_btn, self.bios_manager_btn):
+        for widget in (self.refresh_btn, self.favorites_btn, self.bios_manager_btn,
+                       self.scan_btn, self.local_link_btn):
             widget.setVisible(library)
         for widget in (self.library_btn, self.pause_btn, self.reset_btn,
                        self.states_btn, self.shot_btn, self.full_btn):
@@ -954,41 +969,131 @@ class PokemonGBPage(QWidget):
     def _catalog(self, path: Path) -> str | None:
         """Put a ROM on the shelf without starting it."""
         try:
-            switch_path = prepare_switch(path)
+            self.library.add_catalog((self._catalog_entry(path),))
         except Exception as exc:
             return str(exc)
+        return None
+
+    def _catalog_entry(self, path: Path) -> tuple[Path, str, str, str]:
+        switch_path = prepare_switch(path)
         if switch_path is not None:
-            self.library.remember(switch_path, switch_title(switch_path.name), "Nintendo Switch", "switch")
-            return None
-        try:
-            ds_path = prepare_3ds(path, _saves_dir() / "_cache")
-        except Exception as exc:
-            return str(exc)
+            return path, switch_title(switch_path.name), "Nintendo Switch", "switch"
+        cache = _saves_dir() / "_cache" / game_id(path)
+        ds_path = prepare_3ds(path, cache)
         if ds_path is not None:
             header = n3ds_header(ds_path)
-            self.library.remember(ds_path, n3ds_title(header, ds_path.name), "Nintendo 3DS", "3ds")
-            return None
-        try:
-            found = locate(path, _saves_dir() / "_cache")
-        except Exception as exc:
-            return str(exc)
+            return path, n3ds_title(header, ds_path.name), "Nintendo 3DS", "3ds"
+        found = locate(path, cache)
         if found is not None:
             source, system = found
-            self.library.remember(source, title_of(source.name), system.name, system.id)
-            return None
-        try:
-            data, kind = open_rom(path)
-        except Exception as exc:
-            return str(exc)
+            return path, title_of(source.name), system.name, system.id
+        data, kind = open_rom(path)
         if kind == "gba":
             title, system = gba_title(data), "Game Boy Advance"
         elif kind == "nds":
             title, system = nds_title(data), "Nintendo DS"
         else:
-            color = len(data) > 0x143 and bool(data[0x143] & 0x80)
+            color = bool(data[0x143] & 0x80)
             title, system = rom_title(data), "Game Boy Color" if color else "Game Boy"
-        self.library.remember(path, title, system, kind)
-        return None
+        return path, title, system, kind
+
+    def _scan_rom_folder(self, folder: Path, cancelled=lambda: False) -> tuple[int, int]:
+        known = {game.id for game in self.library.games}
+        skipped = 0
+
+        def unreadable(error):
+            nonlocal skipped
+            skipped += 1
+
+        def entries():
+            nonlocal skipped
+            for directory, folders, names in os.walk(folder, onerror=unreadable):
+                if cancelled():
+                    return
+                folders[:] = sorted(name for name in folders if name != ".git")
+                for name in sorted(names):
+                    if cancelled():
+                        return
+                    path = Path(directory) / name
+                    if path.suffix.lower() not in ROM_SUFFIXES and path.suffix.lower() not in BY_SUFFIX:
+                        continue
+                    if game_id(path) in known:
+                        continue
+                    try:
+                        if path.suffix.lower() == ".exe":
+                            with path.open("rb") as handle:
+                                if handle.read(8) != b"PS-X EXE":
+                                    continue
+                        yield self._catalog_entry(path)
+                    except (OSError, ValueError, RuntimeError, zipfile.BadZipFile):
+                        skipped += 1
+
+        return self.library.add_catalog(entries()), skipped
+
+    def _choose_rom_folder(self) -> None:
+        name = QFileDialog.getExistingDirectory(self, "Scan ROM folder", self._rom_folder)
+        if not name:
+            return
+        self._rom_folder = name
+        self._save_settings()
+        self.rescan_action.setEnabled(True)
+        self._run_rom_scan(Path(name))
+
+    def _rescan_rom_folder(self) -> None:
+        folder = Path(self._rom_folder)
+        if not self._rom_folder or not folder.is_dir():
+            self._choose_rom_folder()
+            return
+        self._run_rom_scan(folder)
+
+    def _run_rom_scan(self, folder: Path) -> None:
+        progress = QProgressDialog("Finding supported games…", "Cancel", 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        last_poll = 0.0
+
+        def cancelled():
+            nonlocal last_poll
+            now = time.monotonic()
+            if now - last_poll >= 0.04:
+                last_poll = now
+                QApplication.processEvents()
+            return progress.wasCanceled()
+
+        try:
+            added, skipped = self._scan_rom_folder(folder, cancelled)
+        except OSError as exc:
+            progress.close()
+            QMessageBox.warning(self, "Scan ROM folder", str(exc))
+            return
+        stopped = progress.wasCanceled()
+        progress.close()
+        self._show_library()
+        summary = "Scan cancelled" if stopped else "Scan finished"
+        self.status.setText(f"{summary} · {added} added · {skipped} unreadable or unsupported")
+
+    def _open_local_link(self) -> None:
+        if self._session is not None:
+            self.status.setText("Disconnect netplay before opening a local link.")
+            return
+        try:
+            self._flush_save()
+        except OSError as exc:
+            QMessageBox.warning(self, "Local Game Boy link", str(exc))
+            return
+        dialog = LocalLinkDialog(self, _saves_dir(), _p2_action)
+        dialog.exec()
+        if self.kind == "gb" and self.rom is not None and self._save_paths()[0] in dialog.written:
+            # A suspended machine could later overwrite the newer linked-session save.
+            self.gb = None
+            self.rom = None
+            self.kind = None
+            self._game_id = ""
+            self.rewind.clear()
+            self._show_library()
+        dialog.deleteLater()
 
     def _show_help(self) -> None:
         dialog = QDialog(self)
@@ -1026,8 +1131,9 @@ class PokemonGBPage(QWidget):
         if switch_path is not None:
             self._load_switch(switch_path)
             return
+        cache = _saves_dir() / "_cache" / game_id(file)
         try:
-            ds_path = prepare_3ds(file, _saves_dir() / "_cache")
+            ds_path = prepare_3ds(file, cache)
         except Exception as exc:
             QMessageBox.warning(self, "Emulator", str(exc))
             return
@@ -1035,7 +1141,7 @@ class PokemonGBPage(QWidget):
             self._load_3ds(ds_path)
             return
         try:
-            found = locate(file, _saves_dir() / "_cache")
+            found = locate(file, cache)
         except Exception as exc:
             QMessageBox.warning(self, "Emulator", str(exc))
             return
@@ -1424,6 +1530,8 @@ class PokemonGBPage(QWidget):
                 self._apply_cheats()
         elif self._game_id == game_id:
             self._apply_cheats()
+            self._prev_frame = None
+            self._present()
         if self.stack.currentWidget() is self.shelf:
             self._show_library()
         else:
@@ -1597,7 +1705,8 @@ class PokemonGBPage(QWidget):
         else:
             if self.gb is None:
                 return
-            frame = self.gb.ppu.fb.tobytes()
+            game = self.library.get(self._game_id) if self._game_id else None
+            frame = gb_picture(self.gb.ppu, game.gb_palette, game.gb_colors) if game else self.gb.ppu.fb.tobytes()
             width, height = 160, 144
             frame, width, height = self._trim_frame(frame, width, height)
             self._touch_size = (width, height)
@@ -1791,37 +1900,19 @@ class PokemonGBPage(QWidget):
             self.audio_io.write(data[:free])
 
     def _save_paths(self) -> tuple[Path, Path]:
-        key = save_key(self.rom or b"")
-        folder = _saves_dir()
-        return folder / f"{key}.sav", folder / f"{key}.rtc.json"
+        return battery_paths(self.rom or b"", _saves_dir())
 
     def _flush_save(self) -> None:
         core = self._core()
         if core is not None and core.game_loaded:
             core.store_sram()
             return
-        if self.gb is None or self.rom is None or not self.gb.mmu.eram:
-            return
-        sav, rtc = self._save_paths()
-        sav.write_bytes(bytes(self.gb.mmu.eram))
-        self.gb.mmu.sram_dirty = False
-        if self.gb.mmu.has_rtc:
-            payload = {
-                "zero": self.gb.mmu.rtc_zero,
-                "halt": self.gb.mmu.rtc_halt,
-                "carry": self.gb.mmu.rtc_carry,
-                "frozen": list(self.gb.mmu.rtc_frozen),
-            }
-            rtc.write_text(json.dumps(payload), encoding="utf-8")
+        if self.gb is not None and self.rom is not None and (self.gb.mmu.eram or self.gb.mmu.has_rtc):
+            write_battery(self.gb, *self._save_paths())
 
     def _restore_save(self) -> None:
-        if self.gb is None or self.rom is None:
-            return
-        sav, rtc = self._save_paths()
-        if sav.exists():
-            self.gb.mmu.import_ram(sav.read_bytes())
-        if self.gb.mmu.has_rtc and rtc.exists():
-            self.gb.mmu.import_rtc(json.loads(rtc.read_text(encoding="utf-8")))
+        if self.gb is not None and self.rom is not None:
+            read_battery(self.gb, *self._save_paths())
 
     def _set_slot(self, slot: int) -> None:
         self.state_slot = slot
@@ -1921,6 +2012,7 @@ class PokemonGBPage(QWidget):
         self._card_scale = 100
         self._list_view = False
         self._show_hidden = False
+        self._rom_folder = ""
         self._geometry: list[int] | None = None
         gamepad.deadzone_percent = self._deadzone
         path = self._settings_path()
@@ -2021,6 +2113,9 @@ class PokemonGBPage(QWidget):
             self._list_view = True
         if raw.get("show_hidden") is True:
             self._show_hidden = True
+        folder = raw.get("rom_folder")
+        if isinstance(folder, str):
+            self._rom_folder = folder
         geo = raw.get("geometry")
         if isinstance(geo, list) and len(geo) == 4 and all(isinstance(item, int) for item in geo):
             self._geometry = geo
@@ -2065,6 +2160,7 @@ class PokemonGBPage(QWidget):
                     "card_scale": self._card_scale,
                     "list_view": self._list_view,
                     "show_hidden": self._show_hidden,
+                    "rom_folder": self._rom_folder,
                     "geometry": self._geometry,
                 }
             ),

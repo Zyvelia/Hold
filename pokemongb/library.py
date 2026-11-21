@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pokemongb.cheats import read_cheat_entries, write_cheat_file
+from pokemongb.picture import GB_PALETTES, gb_colors
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 
@@ -56,6 +57,8 @@ class Game:
     patch_name: str = ""
     tags: list[str] = field(default_factory=list)
     cheats: list[Cheat] = field(default_factory=list)
+    gb_palette: str = "green"
+    gb_colors: tuple[str, ...] = GB_PALETTES["green"][1]
 
     def to_json(self) -> dict:
         return {
@@ -73,6 +76,8 @@ class Game:
             "patch": self.patch,
             "patch_name": self.patch_name,
             "tags": list(self.tags),
+            "gb_palette": self.gb_palette,
+            "gb_colors": list(self.gb_colors),
             "cheats": [cheat.to_json() for cheat in self.cheats],
         }
 
@@ -95,6 +100,8 @@ class Game:
             patch_name=str(raw.get("patch_name", "")),
             tags=[str(item) for item in raw.get("tags", []) if str(item).strip()],
             cheats=cheats,
+            gb_palette=str(raw.get("gb_palette", "green")),
+            gb_colors=gb_colors(raw.get("gb_colors")),
         )
 
 
@@ -161,6 +168,30 @@ class Library:
         found.launches += 1
         self._save()
         return found
+
+    def add_catalog(self, entries) -> int:
+        known = {game.id for game in self.games}
+        additions = []
+        for path, title, system, system_id in entries:
+            key = game_id(path)
+            if key not in known:
+                known.add(key)
+                additions.append(Game(key, str(path), title, system, system_id))
+        if additions:
+            self.games.extend(additions)
+            try:
+                self._save()
+            except OSError:
+                del self.games[-len(additions):]
+                raise
+        return len(additions)
+
+    def set_gb_palette(self, key: str, preset: str, colors) -> None:
+        game = self.get(key)
+        if game is not None and (preset in GB_PALETTES or preset == "custom"):
+            game.gb_palette = preset
+            game.gb_colors = gb_colors(colors)
+            self._save()
 
     def get(self, game_id_: str) -> Game | None:
         for game in self.games:

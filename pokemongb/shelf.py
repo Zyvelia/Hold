@@ -5,11 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QColorDialog,
     QDialog,
     QFileDialog,
     QFrame,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from pokemongb.cheats import KINDS, RamSearch, describe, parse_cheat_file
 from pokemongb.library import Game, Library, format_last_played, format_played
+from pokemongb.picture import GB_PALETTES
 
 _STYLE = """
 QDialog, #Shelf, #ShelfBody { background: #0f1115; color: #e6e6e6; }
@@ -582,6 +584,8 @@ class GameSettings(QDialog):
         picture_row.addStretch(1)
         root.addLayout(picture_row)
         self._load_preview()
+        if game.system_id == "gb" and game.system != "Game Boy Color":
+            self._add_gb_palette(root)
 
         cheats_title = QLabel("Cheats")
         cheats_title.setStyleSheet("font-size: 16px;")
@@ -650,6 +654,45 @@ class GameSettings(QDialog):
         done.clicked.connect(self.accept)
         root.addWidget(remove, alignment=Qt.AlignmentFlag.AlignLeft)
         root.addWidget(done, alignment=Qt.AlignmentFlag.AlignRight)
+
+    def _add_gb_palette(self, root) -> None:
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Game Boy palette"))
+        combo = QComboBox()
+        combo.setObjectName("GameBoyPalette")
+        for key, (name, _) in GB_PALETTES.items():
+            combo.addItem(name, key)
+        combo.addItem("Custom", "custom")
+        combo.setCurrentIndex(max(0, combo.findData(self.game.gb_palette)))
+        row.addWidget(combo, 1)
+        custom = QWidget()
+        colors = QHBoxLayout(custom)
+        colors.setContentsMargins(0, 0, 0, 0)
+        for index in range(4):
+            button = _button(f"Shade {index + 1}")
+            button.setStyleSheet(f"border-bottom: 4px solid {self.game.gb_colors[index]};")
+            button.clicked.connect(
+                lambda checked=False, i=index, swatch=button: self._pick_gb_color(i, swatch)
+            )
+            colors.addWidget(button)
+        custom.setVisible(combo.currentData() == "custom")
+        row.addWidget(custom)
+
+        def change() -> None:
+            preset = combo.currentData()
+            self.library.set_gb_palette(self.game.id, preset, self.game.gb_colors)
+            custom.setVisible(preset == "custom")
+
+        combo.currentIndexChanged.connect(change)
+        root.addLayout(row)
+
+    def _pick_gb_color(self, index: int, button: QPushButton) -> None:
+        colors = list(self.game.gb_colors)
+        color = QColorDialog.getColor(QColor(colors[index]), self, f"Shade {index + 1}")
+        if color.isValid():
+            colors[index] = color.name()
+            self.library.set_gb_palette(self.game.id, "custom", colors)
+            button.setStyleSheet(f"border-bottom: 4px solid {color.name()};")
 
     def _save_tags(self) -> None:
         tags = [part.strip() for part in self.tags_edit.text().split(",")]

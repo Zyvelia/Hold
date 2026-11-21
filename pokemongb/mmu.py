@@ -372,7 +372,7 @@ class MMU:
         if addr == 0xFF01:
             return self.sb
         if addr == 0xFF02:
-            return (self.sc & 0x81) | 0x7E
+            return (self.sc & 0x83) | 0x7C if self.cgb else (self.sc & 0x81) | 0x7E
         if addr == 0xFF04:
             return gb.timer.read_div()
         if addr == 0xFF05:
@@ -418,8 +418,8 @@ class MMU:
         elif addr == 0xFF01:
             self.sb = value
         elif addr == 0xFF02:
-            self.sc = value & 0x81
-            if self.sc == 0x81:
+            self.sc = value & (0x83 if self.cgb else 0x81)
+            if (self.sc & 0x81) == 0x81:
                 gb.serial_cc = 0
         elif addr == 0xFF04:
             gb.timer.write_div()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from array import array
+
 _MATRICES = {
     "protanopia": (
         (0.567, 0.433, 0.0),
@@ -118,3 +120,35 @@ def screens_top_large(frame: bytes, width: int, height: int) -> tuple[bytes, int
         dest = ((bottom_y + y) * out_w + x0) * 4
         out[dest:dest + stride] = row
     return bytes(out), out_w, out_h
+
+
+GB_PALETTES = {
+    "green": ("Original green", ("#E0F8D0", "#88C070", "#346856", "#081820")),
+    "gray": ("Grayscale", ("#FFFFFF", "#AAAAAA", "#555555", "#000000")),
+    "pocket": ("Game Boy Pocket", ("#E9EBDE", "#A6AA98", "#5B6056", "#252820")),
+}
+
+
+def gb_colors(value) -> tuple[str, ...]:
+    """Validate four RGB colors from a library entry."""
+    if isinstance(value, (list, tuple)) and len(value) == 4 and all(
+        isinstance(color, str) and len(color) == 7 and color.startswith("#")
+        and all(digit in "0123456789abcdefABCDEF" for digit in color[1:])
+        for color in value
+    ):
+        return tuple(color.upper() for color in value)
+    return GB_PALETTES["green"][1]
+
+
+def gb_picture(screen, preset: str, custom=()) -> bytes:
+    """Recolor DMG pixels at presentation time, leaving state and CGB colors intact."""
+    if screen.cgb or preset == "green":
+        return screen.fb.tobytes()
+    colors = gb_colors(custom) if preset == "custom" else GB_PALETTES.get(
+        preset, GB_PALETTES["green"]
+    )[1]
+    table = {
+        0xFF000000 | int(source[1:], 16): 0xFF000000 | int(dest[1:], 16)
+        for source, dest in zip(GB_PALETTES["green"][1], colors)
+    }
+    return array("I", (table.get(pixel, pixel) for pixel in screen.fb)).tobytes()

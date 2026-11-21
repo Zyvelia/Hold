@@ -153,29 +153,40 @@ class GameBoy:
         self.mmu.iff |= 0x08
 
     def run_frame(self) -> None:
+        self.apply_ram_cheats()
+        self.ppu.frame_ready = False
+        self._run()
+
+    def apply_ram_cheats(self) -> None:
         if self.ram_cheats:
             write = self.mmu.write
             for address, value in self.ram_cheats:
                 write(address, value)
+
+    def run_dots(self, budget: int, exchange) -> int:
+        """Run linked hardware for a bounded number of LCD dots."""
+        return self._run(budget, exchange)
+
+    def _run(self, budget: int | None = None, exchange=None) -> int:
         ppu = self.ppu
         mmu = self.mmu
         step = self.cpu.step
         timer_tick = self.timer.tick
         ppu_tick = ppu.tick
         apu_tick = self.apu.tick
-        ppu.frame_ready = False
         credit = self._credit
-        double = self.double_speed
         audio = 0
-        serial = self.serial_cc
+        elapsed = 0
         guard = 0
         idle = 0
-        while not ppu.frame_ready and guard < 1_000_000:
+        while guard < 1_000_000:
+            if (budget is None and ppu.frame_ready) or (budget is not None and elapsed >= budget):
+                break
             cycles = step()
             if cycles < 4:
                 cycles = 4
             timer_tick(cycles)
-            if double:
+            if self.double_speed:
                 credit += cycles
                 dots = credit >> 1
                 credit &= 1
@@ -183,11 +194,16 @@ class GameBoy:
                 dots = cycles
             if dots:
                 if (mmu.sc & 0x81) == 0x81:
-                    serial += dots
-                    if serial >= 4096:
-                        serial -= 4096
-                        self._complete_serial()
+                    serial_period = 128 if self.cgb and mmu.sc & 0x02 else 4096
+                    self.serial_cc += cycles
+                    if self.serial_cc >= serial_period:
+                        self.serial_cc = 0
+                        if exchange is None:
+                            self._complete_serial()
+                        else:
+                            exchange()
                 ppu_tick(dots)
+                elapsed += dots
                 audio += dots
                 if audio >= 456:
                     apu_tick(audio)
@@ -202,8 +218,46 @@ class GameBoy:
         if audio:
             apu_tick(audio)
         self._credit = credit
-        self.serial_cc = serial
         if guard >= 1_000_000 and not ppu.frame_ready and (ppu.lcdc & 0x80):
             raise RuntimeError(
                 f"frame stalled at pc={self.cpu.pc:04X} ly={ppu.ly} lcdc={ppu.lcdc:02X}"
+            )
+        return elapsed
+
+
+class LocalLink:
+    """Clock two Game Boys on one timeline and exchange serial bytes in memory."""
+
+    FRAME_DOTS = 70224
+
+    def __init__(self, first: GameBoy, second: GameBoy):
+        self.games = (first, second)
+        self.elapsed = [0, 0]
+        self.target = 0
+        self.transfers = 0
+
+    def _exchange(self, port: int) -> None:
+        sender = self.games[port]
+        peer = self.games[1 - port]
+        if peer.mmu.sc & 0x80:
+            outgoing, incoming = sender.mmu.sb, peer.mmu.sb
+            sender.link_in = incoming
+            peer.link_in = outgoing
+            peer.serial_cc = 0
+            peer._complete_serial()
+            peer.link_in = None
+            self.transfers += 1
+        sender._complete_serial()
+        sender.link_in = None
+
+    def run_frame(self) -> None:
+        self.target += self.FRAME_DOTS
+        for game in self.games:
+            game.apply_ram_cheats()
+            game.ppu.frame_ready = False
+        while min(self.elapsed) < self.target:
+            port = 0 if self.elapsed[0] <= self.elapsed[1] else 1
+            left = self.target - self.elapsed[port]
+            self.elapsed[port] += self.games[port].run_dots(
+                min(left, 32), lambda: self._exchange(port)
             )

@@ -87,8 +87,11 @@ def _zip_rom_name(zf: zipfile.ZipFile) -> str:
 def open_rom(path: Path) -> tuple[bytes, str]:
     """Return ROM bytes and ``gb``, ``gba``, or ``nds``."""
     path = Path(path)
-    data = path.read_bytes()
     name = path.name
+    if path.suffix.lower() == ".zip":
+        data = b""
+    else:
+        data = path.read_bytes()
     if path.suffix.lower() == ".zip" or data[:4] == b"PK\x03\x04":
         with zipfile.ZipFile(path) as zf:
             name = _zip_rom_name(zf)
@@ -247,3 +250,6 @@ def prepare_switch(path: Path) -> Path | None:
     if not path.is_file() or path.stat().st_size < 0x40:
         raise ValueError("That file is too small to be a Nintendo Switch ROM.")
     return path
+
+
+ROM_SUFFIXES = frozenset((".gb", ".gbc", ".gba", ".nds", ".zip", *_3DS_SUFFIXES, *_SWITCH_SUFFIXES))

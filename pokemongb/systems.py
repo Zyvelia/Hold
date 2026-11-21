@@ -327,7 +327,8 @@ def _sniff_disc(path: Path) -> System | None:
     for name in names:
         disc = path.parent / name
         try:
-            head = disc.read_bytes()[:0x200]
+            with disc.open("rb") as handle:
+                head = handle.read(0x200)
         except OSError:
             continue
         if b"SEGADISCSYSTEM" in head or b"SEGADISC" in head:
