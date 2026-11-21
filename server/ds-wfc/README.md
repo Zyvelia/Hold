@@ -9,6 +9,8 @@ Run one private Nintendo DS network with friend codes for live Wi-Fi Club sessio
 
 ## Run it
 
+For a Windows home PC and a later move to a dedicated machine, follow the [Windows hosting and migration guide](WINDOWS-HOST.md).
+
 Use Docker Compose with Linux containers. The AltWFC image runs as Linux x86-64 because its pinned legacy dependencies use x86-64 wheels.
 
 1. Set up the private GTS web application and initialize its database using the [upstream deployment instructions](https://github.com/mm201/pkmn-classic-framework/wiki/Creating-a-development-server). The framework is deployed separately under [its own license](https://github.com/mm201/pkmn-classic-framework/blob/master/LICENSE.md). Publish the GTS web application at the root of its private HTTP origin so the `/pokemondpds/` and `/syachi2ds/` endpoints are available.
