@@ -85,6 +85,7 @@ _SYSTEMS = (
             (b"dolphin_main_cpu_thread", b"disabled"),
             (b"dolphin_skip_gc_bios", b"enabled"),
         ),
+        manual_suffixes=(".ciso", ".wia", ".m3u"),
     ),
     System(
         "wii",
@@ -99,6 +100,7 @@ _SYSTEMS = (
             (b"dolphin_main_cpu_thread", b"disabled"),
             (b"dolphin_skip_gc_bios", b"enabled"),
         ),
+        manual_suffixes=(".iso", ".rvz", ".gcz", ".ciso", ".m3u"),
     ),
     System(
         "psp",
@@ -130,6 +132,7 @@ _SYSTEMS = (
         True,
         scale=2,
         hardware="opengl",
+        manual_suffixes=(".bin",),
     ),
     System(
         "dc",
@@ -180,6 +183,7 @@ _SYSTEMS = (
         True,
         scale=1,
         hardware="vulkan",
+        manual_suffixes=(".iso", ".elf", ".tmd"),
     ),
 )
 
@@ -203,6 +207,8 @@ OPTIONAL_BY_ID = {system.id: system for system in OPTIONAL_CONSOLES}
 _ALL_SYSTEMS = _SYSTEMS + OPTIONAL_CONSOLES
 BY_ID = {system.id: system for system in _ALL_SYSTEMS}
 BY_SUFFIX = {suffix: system for system in _ALL_SYSTEMS for suffix in system.suffixes}
+EXPLICIT_CONSOLES = OPTIONAL_CONSOLES + tuple(BY_ID[name] for name in ("n64", "gc", "wii", "wiiu"))
+EXPLICIT_BY_ID = {system.id: system for system in EXPLICIT_CONSOLES}
 _HANDHELD = {".gb", ".gbc", ".gba", ".nds"}
 
 

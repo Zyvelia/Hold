@@ -10,7 +10,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from pokemongb.core_install import install_core
+from pokemongb.core_install import (
+    POKEMON_DOWNLOADS, POKEMON_PLATFORMS, dolphin_assets_present, install_core, install_dolphin_assets,
+)
 from pokemongb.library import Library
 from pokemongb.page import PokemonGBPage
 from pokemongb.systems import BY_ID, bios_dir, cores_dir, locate, locate_as
@@ -66,12 +68,46 @@ class OptionalConsoleTests(unittest.TestCase):
             root = Path(folder)
             with patch("pokemongb.core_install.can_install_windows_core", return_value=True):
                 with patch("pokemongb.core_install.urllib.request.urlopen", return_value=response) as request:
-                    target = install_core(system, root)
+                    target = install_core(system.dll, root)
                     self.assertEqual(target.read_bytes(), expected)
                     self.assertEqual(set(root.iterdir()), {target})
-                    self.assertEqual(install_core(system, root), target)
+                    self.assertEqual(install_core(system.dll, root), target)
                 self.assertEqual(request.call_count, 1)
                 self.assertTrue(request.call_args.args[0].startswith("https://buildbot.libretro.com/"))
+
+    def test_pokemon_platforms_and_shared_game_formats(self):
+        self.assertIsNone(POKEMON_PLATFORMS[0].core)
+        self.assertIn("dolphin_libretro.dll", POKEMON_DOWNLOADS)
+        self.assertNotIn("suyu_libretro.dll", POKEMON_DOWNLOADS)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            wii = root / "wii.rvz"
+            wii.write_bytes(bytes(32))
+            self.assertEqual(locate_as(wii, root, BY_ID["wii"]), wii)
+            title = root / "title.tmd"
+            title.write_bytes(bytes(32))
+            self.assertEqual(locate_as(title, root, BY_ID["wiiu"]), title)
+
+    def test_dolphin_install_keeps_user_settings_and_license(self):
+        response = io.BytesIO()
+        with zipfile.ZipFile(response, "w") as archive:
+            archive.writestr("dolphin-emu/Sys/codehandler.bin", b"handler")
+            archive.writestr("dolphin-emu/Sys/GameSettings/GAME.ini", b"defaults")
+            archive.writestr("dolphin-emu/license.txt", b"license")
+        response.seek(0)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            dest = root / "system" / "dolphin-emu"
+            settings = dest / "Sys" / "GameSettings" / "GAME.ini"
+            settings.parent.mkdir(parents=True)
+            settings.write_bytes(b"custom")
+            with patch("pokemongb.core_install.urllib.request.urlopen", return_value=response) as request:
+                install_dolphin_assets(root)
+                self.assertTrue(dolphin_assets_present(root))
+                self.assertEqual(settings.read_bytes(), b"custom")
+                self.assertEqual((dest / "license.txt").read_bytes(), b"license")
+                install_dolphin_assets(root)
+            self.assertEqual(request.call_count, 1)
 
     def test_console_installer_button_reports_completion(self):
         app = QApplication.instance() or QApplication([])
@@ -87,7 +123,7 @@ class OptionalConsoleTests(unittest.TestCase):
                 page = PokemonGBPage()
                 try:
                     page.core_btn.click()
-                    install.assert_called_once_with(BY_ID["coleco"])
+                    install.assert_called_once_with(BY_ID["coleco"].dll)
                     self.assertIn("ColecoVision core installed", page.status.text())
                 finally:
                     page.close()

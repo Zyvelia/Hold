@@ -45,7 +45,10 @@ from PySide6.QtWidgets import (
 )
 
 from pokemongb.cheats import _parse_address
-from pokemongb.core_install import can_install_windows_core, install_core
+from pokemongb.core_install import (
+    POKEMON_DOWNLOADS, POKEMON_PLATFORMS, can_install_windows_core,
+    dolphin_assets_present, install_core, install_dolphin_assets,
+)
 from pokemongb.cart import (
     gba_save_key,
     gba_title,
@@ -89,7 +92,7 @@ from pokemongb.switch import open_core as open_switch
 from pokemongb.switch import pack_state as pack_switch_state
 from pokemongb.switch import unpack_state as unpack_switch_state
 from pokemongb.system import GameBoy
-from pokemongb.systems import BY_ID, BY_SUFFIX, OPTIONAL_BY_ID, OPTIONAL_CONSOLES, System, locate_as
+from pokemongb.systems import BY_ID, BY_SUFFIX, EXPLICIT_BY_ID, EXPLICIT_CONSOLES, OPTIONAL_CONSOLES, locate_as
 from pokemongb.systems import extra_globs
 from pokemongb.systems import cores_dir
 from pokemongb.systems import module_dir
@@ -124,7 +127,8 @@ _HELP = (
     "Xbox needs mcpx_1.0.bin, Complex_4627v1.03.bin, and xbox_hdd.qcow2 in cores\\system\\xemu. "
     "Xbox 360 opens an .xex. Wii U needs keys.txt in cores\\system\\Cemu.\n"
     "Use Open as console for shared BIN, ISO, CUE, and CHD formats. "
-    "Console cores installs the optional Windows cores. BIOS Manager lists firmware you can add.\n"
+    "Console cores installs the optional Windows cores. Pokémon cores checks the Nintendo platforms "
+    "and installs missing components. BIOS Manager lists firmware you can add.\n"
     "Library keeps every ROM you open. The three dots on a cartridge set its picture and cheats.\n"
     "Open ROM accepts more than one file. Those games wait in the library until you pick one.\n"
     "Controls, beside Help, is where you choose which key and which controller button does each action. "
@@ -590,14 +594,14 @@ class BiosManager(QDialog):
 
 
 class _CoreInstallWorker(QThread):
-    def __init__(self, system: System, parent):
+    def __init__(self, operation, parent):
         super().__init__(parent)
-        self.system = system
+        self.operation = operation
         self.error = ""
 
     def run(self) -> None:
         try:
-            install_core(self.system)
+            self.operation()
         except (OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
             self.error = str(exc)
 
@@ -723,6 +727,7 @@ class PokemonGBPage(QWidget):
         self.local_link_btn = self._button("Local Game Boy link", self._open_local_link)
         self.console_btn = self._button("Open as console", self._open_as_console)
         self.core_btn = self._button("Console cores", self._show_console_cores)
+        self.pokemon_cores_btn = self._button("Pokémon cores", self._show_pokemon_cores)
         self.bios_btn = self._button("Add BIOS", self._add_bios)
         self.bios_btn.setObjectName("BiosButton")
         self.library_btn = self._button("Library", self._toggle_library)
@@ -806,7 +811,7 @@ class PokemonGBPage(QWidget):
         for widget in (
             self.open_btn, self.library_btn, self.pause_btn, self.reset_btn,
             self.states_btn, self.shot_btn, self.full_btn,
-            self.scan_btn, self.local_link_btn, self.console_btn, self.core_btn,
+            self.scan_btn, self.local_link_btn, self.console_btn, self.core_btn, self.pokemon_cores_btn,
             self.refresh_btn, self.favorites_btn,
             self.bios_manager_btn, self.more_btn,
         ):
@@ -909,7 +914,7 @@ class PokemonGBPage(QWidget):
         """Show library actions in Library and gameplay actions in Playing."""
         library = self.stack.currentWidget() is self.shelf
         for widget in (self.refresh_btn, self.favorites_btn, self.bios_manager_btn,
-                       self.scan_btn, self.local_link_btn, self.console_btn, self.core_btn):
+                       self.scan_btn, self.local_link_btn, self.console_btn, self.core_btn, self.pokemon_cores_btn):
             widget.setVisible(library)
         for widget in (self.library_btn, self.pause_btn, self.reset_btn,
                        self.states_btn, self.shot_btn, self.full_btn):
@@ -986,7 +991,7 @@ class PokemonGBPage(QWidget):
         self._add_roms(paths)
 
     def _open_as_console(self) -> None:
-        systems = {system.name: system for system in OPTIONAL_CONSOLES}
+        systems = {system.name: system for system in EXPLICIT_CONSOLES}
         name, accepted = QInputDialog.getItem(
             self, "Open as console", "Console", sorted(systems), editable=False,
         )
@@ -1037,24 +1042,113 @@ class PokemonGBPage(QWidget):
         )
         if not accepted:
             return
+        error = self._run_core_install(
+            "Console cores", f"Downloading {name} from Libretro…",
+            lambda: install_core(missing[name].dll),
+        )
+        if error:
+            QMessageBox.warning(self, "Console cores", error)
+        else:
+            self.status.setText(f"{name} core installed. Open the game from the library.")
+
+    def _run_core_install(self, title: str, message: str, operation) -> str:
         progress = _CoreInstallProgress(self)
-        progress.setWindowTitle("Console cores")
+        progress.setWindowTitle(title)
         progress.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
         layout = QVBoxLayout(progress)
-        layout.addWidget(QLabel(f"Downloading {name} from Libretro…"))
+        layout.addWidget(QLabel(message))
         bar = QProgressBar()
         bar.setRange(0, 0)
         layout.addWidget(bar)
-        worker = _CoreInstallWorker(missing[name], progress)
+        worker = _CoreInstallWorker(operation, progress)
         worker.finished.connect(progress.accept)
         worker.start()
         progress.exec()
         worker.wait()
-        if worker.error:
-            QMessageBox.warning(self, "Console cores", worker.error)
-        else:
-            self.status.setText(f"{name} core installed. Open the game from the library.")
+        error = worker.error
         progress.deleteLater()
+        return error
+
+    def _show_pokemon_cores(self) -> None:
+        directory = cores_dir()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Pokémon cores")
+        dialog.resize(700, 580)
+        layout = QVBoxLayout(dialog)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        rows = QVBoxLayout(body)
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
+        hint = QLabel(
+            "GameCube and Wii use Dolphin system files. Switch uses the bundled Suyu core, "
+            "Vulkan, and Microsoft's Visual C++ x64 runtime. Some newer games need "
+            "system files supplied by the player."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        buttons = QHBoxLayout()
+        install = QPushButton("Install missing components")
+        close = QPushButton("Close")
+        close.clicked.connect(dialog.accept)
+        buttons.addWidget(install)
+        buttons.addStretch()
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+        def refresh() -> None:
+            while rows.count():
+                widget = rows.takeAt(0).widget()
+                if widget is not None:
+                    widget.deleteLater()
+            for entry in POKEMON_PLATFORMS:
+                if entry.core is None:
+                    status = "Built in"
+                elif (directory / entry.core).is_file():
+                    status = "Core installed"
+                else:
+                    status = "Core missing"
+                if entry.core == BY_ID["gc"].dll and not dolphin_assets_present(directory):
+                    status += " · Dolphin system files missing"
+                heading = QLabel(f"{entry.name} · {status}")
+                heading.setStyleSheet("font-weight: bold;")
+                rows.addWidget(heading)
+                detail = QLabel(f"{entry.games}\n{entry.files}")
+                detail.setWordWrap(True)
+                rows.addWidget(detail)
+            rows.addStretch()
+            missing = any(not (directory / name).is_file() for name in POKEMON_DOWNLOADS)
+            install.setEnabled(can_install_windows_core() and (missing or not dolphin_assets_present(directory)))
+            if not can_install_windows_core():
+                install.setToolTip("Core installation requires Windows x64.")
+
+        def install_missing() -> None:
+            def download() -> None:
+                errors = []
+                for name in POKEMON_DOWNLOADS:
+                    if not (directory / name).is_file():
+                        try:
+                            install_core(name, directory)
+                        except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
+                            errors.append(f"{name}: {exc}")
+                try:
+                    install_dolphin_assets(directory)
+                except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
+                    errors.append(f"Dolphin system files: {exc}")
+                if errors:
+                    raise RuntimeError("\n".join(errors))
+
+            error = self._run_core_install(
+                "Pokémon cores", "Installing missing components from Libretro…", download,
+            )
+            refresh()
+            if error:
+                QMessageBox.warning(dialog, "Pokémon cores", error)
+
+        install.clicked.connect(install_missing)
+        refresh()
+        dialog.exec()
 
     def _add_roms(self, paths: list[str]) -> None:
         files = [Path(path) for path in paths if path]
@@ -1230,8 +1324,8 @@ class PokemonGBPage(QWidget):
 
     def _load_queued(self, file: Path) -> None:
         game = self.library.by_path(file)
-        selected = OPTIONAL_BY_ID.get(game.system_id) if game is not None else None
-        if selected is not None:
+        selected = EXPLICIT_BY_ID.get(game.system_id) if game is not None else None
+        if selected is not None and not (file.suffix.lower() == ".zip" and selected.full_path):
             try:
                 source = locate_as(file, self._console_cache(file, selected), selected)
             except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
