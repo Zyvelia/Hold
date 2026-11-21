@@ -1,0 +1,44 @@
+{
+    auto_https off
+    admin off
+}
+
+:8080 {
+    @gts {
+        host gamestats2.gs.nintendowifi.net
+        path /pokemondpds/* /syachi2ds/*
+        method GET
+    }
+    @nas {
+        host nas.nintendowifi.net
+        path /ac /pr
+        method POST
+    }
+    @connectionTest {
+        host conntest.nintendowifi.net
+        method GET
+    }
+
+    handle @gts {
+        reverse_proxy {$GTS_UPSTREAM} {
+            # Preserve the original request path, query and Host for the GTS site.
+            transport http {
+                dial_timeout 3s
+                response_header_timeout 10s
+                compression off
+            }
+        }
+    }
+    handle @nas {
+        reverse_proxy friend-codes:9000
+    }
+    handle @connectionTest {
+        respond "ok" 200
+    }
+    handle /healthz {
+        respond "ok" 200
+    }
+    handle {
+        respond 404
+    }
+}
