@@ -1,0 +1,37 @@
+name: hold-ds-wfc
+
+services:
+  friend-codes:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: altwfc.Dockerfile
+    init: true
+    restart: unless-stopped
+    volumes:
+      - wfc-profiles:/app/state
+    ports:
+      - "${WFC_BIND_IP:-127.0.0.1}:29900:29900/tcp"
+      - "${WFC_BIND_IP:-127.0.0.1}:29901:29901/tcp"
+      - "${WFC_BIND_IP:-127.0.0.1}:28910:28910/tcp"
+      - "${WFC_BIND_IP:-127.0.0.1}:29920:29920/tcp"
+      - "${WFC_BIND_IP:-127.0.0.1}:27900:27900/udp"
+      - "${WFC_BIND_IP:-127.0.0.1}:27901:27901/udp"
+
+  gateway:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    depends_on:
+      - friend-codes
+    environment:
+      GTS_UPSTREAM: "${GTS_UPSTREAM:?Set GTS_UPSTREAM in .env to your private GTS server}"
+      NO_PROXY: "friend-codes,host.docker.internal,127.0.0.1,localhost,${WFC_NO_PROXY:-}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "${WFC_BIND_IP:-127.0.0.1}:${WFC_HTTP_PORT:-80}:8080/tcp"
+
+volumes:
+  wfc-profiles:
