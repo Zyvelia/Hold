@@ -169,20 +169,29 @@ class Library:
         self._save()
         return found
 
-    def add_catalog(self, entries) -> int:
-        known = {game.id for game in self.games}
+    def add_catalog(self, entries, *, update_system: bool = False) -> int:
+        known = {game.id: game for game in self.games}
         additions = []
+        updates = []
         for path, title, system, system_id in entries:
             key = game_id(path)
-            if key not in known:
-                known.add(key)
-                additions.append(Game(key, str(path), title, system, system_id))
-        if additions:
+            game = known.get(key)
+            if game is None:
+                game = Game(key, str(path), title, system, system_id)
+                additions.append(game)
+                known[key] = game
+            elif update_system and (game.system, game.system_id) != (system, system_id):
+                updates.append((game, game.system, game.system_id))
+                game.system, game.system_id = system, system_id
+        if additions or updates:
             self.games.extend(additions)
             try:
                 self._save()
             except OSError:
-                del self.games[-len(additions):]
+                if additions:
+                    del self.games[-len(additions):]
+                for game, system, system_id in reversed(updates):
+                    game.system, game.system_id = system, system_id
                 raise
         return len(additions)
 

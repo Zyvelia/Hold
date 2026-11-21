@@ -43,6 +43,11 @@ class System:
     scale: int = 2
     variables: tuple[tuple[bytes, bytes], ...] = ()
     hardware: str | None = None
+    manual_suffixes: tuple[str, ...] = ()
+
+    @property
+    def open_suffixes(self) -> tuple[str, ...]:
+        return self.suffixes + self.manual_suffixes
 
 
 _SYSTEMS = (
@@ -178,8 +183,26 @@ _SYSTEMS = (
     ),
 )
 
-BY_ID = {system.id: system for system in _SYSTEMS}
-BY_SUFFIX = {suffix: system for system in _SYSTEMS for suffix in system.suffixes}
+OPTIONAL_CONSOLES = (
+    System("coleco", "ColecoVision", "gearcoleco_libretro.dll", (".col", ".cv"), False,
+           manual_suffixes=(".bin", ".rom")),
+    System("intv", "Intellivision", "freeintv_libretro.dll", (".int",), False,
+           manual_suffixes=(".bin", ".rom")),
+    System("odyssey2", "Odyssey² / Videopac", "o2em_libretro.dll", (), False,
+           manual_suffixes=(".bin",)),
+    System("3do", "3DO", "opera_libretro.dll", (), True,
+           manual_suffixes=(".chd", ".cue", ".iso", ".bin")),
+    System("neocd", "Neo Geo CD", "neocd_libretro.dll", (), True,
+           manual_suffixes=(".chd", ".cue")),
+    System("pcfx", "PC-FX", "mednafen_pcfx_libretro.dll", (), True,
+           manual_suffixes=(".chd", ".cue", ".ccd", ".toc")),
+    System("gamewatch", "Game & Watch", "gw_libretro.dll", (".mgw",), False),
+)
+
+OPTIONAL_BY_ID = {system.id: system for system in OPTIONAL_CONSOLES}
+_ALL_SYSTEMS = _SYSTEMS + OPTIONAL_CONSOLES
+BY_ID = {system.id: system for system in _ALL_SYSTEMS}
+BY_SUFFIX = {suffix: system for system in _ALL_SYSTEMS for suffix in system.suffixes}
 _HANDHELD = {".gb", ".gbc", ".gba", ".nds"}
 
 
@@ -200,6 +223,10 @@ def bios_dir(filename: str, size: int = 0) -> Path:
     """Where a BIOS file belongs inside this module."""
     system = cores_dir() / "system"
     name = Path(filename).name.lower()
+    if name in {"neocd_f.rom", "neocd_sf.rom", "front-sp1.bin", "neocd_t.rom",
+                "neocd_st.rom", "top-sp1.bin", "neocd_z.rom", "neocd_sz.rom", "neocd.bin",
+                "ng-lo.rom", "000-lo.lo", "uni-bioscd.rom"}:
+        return system / "neocd"
     if name == "neogeo.zip":
         return system / "fbneo"
     if name in {"mcpx_1.0.bin", "complex_4627v1.03.bin", "xbox_hdd.qcow2"} or name.startswith("mcpx_"):
@@ -233,7 +260,8 @@ def extra_globs() -> str:
 def open_core(system: System, save_dir: Path) -> Core:
     dll = cores_dir() / system.dll
     if not dll.is_file():
-        raise CoreError(f"The {system.name} core is missing (cores/{system.dll}).")
+        install = " Open Library → Console cores to install it." if system.id in OPTIONAL_BY_ID else ""
+        raise CoreError(f"The {system.name} core is missing (cores/{system.dll}).{install}")
     system_root = dll.parent / "system"
     if system.id == "ps2":
         (system_root / "pcsx2" / "bios").mkdir(parents=True, exist_ok=True)
@@ -336,6 +364,31 @@ def _sniff_disc(path: Path) -> System | None:
         if b"SEGASATURN" in head:
             return BY_ID["saturn"]
     return None
+
+
+def locate_as(path: Path, cache: Path, system: System) -> Path:
+    """Use the chosen console for ambiguous extensions such as BIN or CHD."""
+    suffix = path.suffix.lower()
+    if suffix == ".zip" and not system.full_path:
+        with zipfile.ZipFile(path) as archive:
+            matches = [
+                entry for entry in archive.infolist()
+                if not entry.is_dir() and not entry.filename.startswith("__MACOSX/")
+                and Path(entry.filename).suffix.lower() in system.open_suffixes
+            ]
+            if len(matches) != 1:
+                raise ValueError(f"Choose a ZIP with exactly one {system.name} game.")
+            entry = matches[0]
+            cache.mkdir(parents=True, exist_ok=True)
+            path = cache / Path(entry.filename).name
+            with archive.open(entry) as source, path.open("wb") as target:
+                shutil.copyfileobj(source, target)
+    elif suffix not in system.open_suffixes:
+        allowed = ", ".join(system.open_suffixes)
+        raise ValueError(f"{system.name} opens these file types: {allowed}.")
+    if not path.is_file() or path.stat().st_size < 16:
+        raise ValueError(f"That file is too small to be a {system.name} game.")
+    return path
 
 
 def locate(path: Path, cache: Path) -> tuple[Path, System] | None:

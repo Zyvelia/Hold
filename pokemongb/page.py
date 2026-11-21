@@ -14,7 +14,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QKeyEvent, QMouseEvent, QPainter, QPixmap, QTransform
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QAudioSource, QMediaDevices
 from PySide6.QtWidgets import (
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QPushButton,
+    QProgressBar,
     QProgressDialog,
     QScrollArea,
     QSizePolicy,
@@ -44,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from pokemongb.cheats import _parse_address
+from pokemongb.core_install import can_install_windows_core, install_core
 from pokemongb.cart import (
     gba_save_key,
     gba_title,
@@ -87,7 +89,7 @@ from pokemongb.switch import open_core as open_switch
 from pokemongb.switch import pack_state as pack_switch_state
 from pokemongb.switch import unpack_state as unpack_switch_state
 from pokemongb.system import GameBoy
-from pokemongb.systems import BY_ID, BY_SUFFIX
+from pokemongb.systems import BY_ID, BY_SUFFIX, OPTIONAL_BY_ID, OPTIONAL_CONSOLES, System, locate_as
 from pokemongb.systems import extra_globs
 from pokemongb.systems import cores_dir
 from pokemongb.systems import module_dir
@@ -121,6 +123,8 @@ _HELP = (
     "An arcade zip opens as Arcade. Neo Geo needs neogeo.zip in cores\\system\\fbneo. "
     "Xbox needs mcpx_1.0.bin, Complex_4627v1.03.bin, and xbox_hdd.qcow2 in cores\\system\\xemu. "
     "Xbox 360 opens an .xex. Wii U needs keys.txt in cores\\system\\Cemu.\n"
+    "Use Open as console for shared BIN, ISO, CUE, and CHD formats. "
+    "Console cores installs the optional Windows cores. BIOS Manager lists firmware you can add.\n"
     "Library keeps every ROM you open. The three dots on a cartridge set its picture and cheats.\n"
     "Open ROM accepts more than one file. Those games wait in the library until you pick one.\n"
     "Controls, beside Help, is where you choose which key and which controller button does each action. "
@@ -485,6 +489,15 @@ class BiosManager(QDialog):
         ("Neo Geo (FBNeo)", "Required for Neo Geo", ("neogeo.zip",), "all", "fbneo"),
         ("Xbox", "Required", ("mcpx_1.0.bin", "Complex_4627v1.03.bin", "xbox_hdd.qcow2"), "all", "xemu"),
         ("Wii U", "Some encrypted games", ("keys.txt",), "all", "Cemu"),
+        ("ColecoVision", "Required", ("colecovision.rom",), "all", ""),
+        ("Intellivision", "Required", ("exec.bin", "grom.bin"), "all", ""),
+        ("Odyssey² / Videopac", "One matching model BIOS", ("o2rom.bin", "c52.bin", "g7400.bin", "jopac.bin"), "any", ""),
+        ("3DO", "One supported BIOS", ("panafz1.bin", "panafz10.bin", "goldstar.bin", "sanyotry.bin",
+                                      "panafz1j.bin", "panafz10e-anvil.bin"), "any", ""),
+        ("Neo Geo CD", "One supported BIOS", ("neocd*.rom", "front-sp1.bin", "top-sp1.bin",
+                                              "neocd.bin", "uni-bioscd.rom"), "any", "neocd"),
+        ("Neo Geo CD", "Y-ZOOM ROM", ("ng-lo.rom", "000-lo.lo"), "any", "neocd"),
+        ("PC-FX", "Required", ("pcfx.rom",), "all", ""),
     )
 
     def __init__(self, page: "PokemonGBPage"):
@@ -574,6 +587,25 @@ class BiosManager(QDialog):
     def _add(self) -> None:
         self.page._add_bios()
         self.refresh()
+
+
+class _CoreInstallWorker(QThread):
+    def __init__(self, system: System, parent):
+        super().__init__(parent)
+        self.system = system
+        self.error = ""
+
+    def run(self) -> None:
+        try:
+            install_core(self.system)
+        except (OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
+            self.error = str(exc)
+
+
+class _CoreInstallProgress(QDialog):
+    def reject(self) -> None:
+        # The download has a network timeout and finishes independently of this dialog.
+        pass
 
 
 class PokemonGBPage(QWidget):
@@ -689,6 +721,8 @@ class PokemonGBPage(QWidget):
         scan_menu.addAction("Choose folder…", self._choose_rom_folder)
         self.scan_btn.setMenu(scan_menu)
         self.local_link_btn = self._button("Local Game Boy link", self._open_local_link)
+        self.console_btn = self._button("Open as console", self._open_as_console)
+        self.core_btn = self._button("Console cores", self._show_console_cores)
         self.bios_btn = self._button("Add BIOS", self._add_bios)
         self.bios_btn.setObjectName("BiosButton")
         self.library_btn = self._button("Library", self._toggle_library)
@@ -772,7 +806,8 @@ class PokemonGBPage(QWidget):
         for widget in (
             self.open_btn, self.library_btn, self.pause_btn, self.reset_btn,
             self.states_btn, self.shot_btn, self.full_btn,
-            self.scan_btn, self.local_link_btn, self.refresh_btn, self.favorites_btn,
+            self.scan_btn, self.local_link_btn, self.console_btn, self.core_btn,
+            self.refresh_btn, self.favorites_btn,
             self.bios_manager_btn, self.more_btn,
         ):
             bar.add(widget)
@@ -874,7 +909,7 @@ class PokemonGBPage(QWidget):
         """Show library actions in Library and gameplay actions in Playing."""
         library = self.stack.currentWidget() is self.shelf
         for widget in (self.refresh_btn, self.favorites_btn, self.bios_manager_btn,
-                       self.scan_btn, self.local_link_btn):
+                       self.scan_btn, self.local_link_btn, self.console_btn, self.core_btn):
             widget.setVisible(library)
         for widget in (self.library_btn, self.pause_btn, self.reset_btn,
                        self.states_btn, self.shot_btn, self.full_btn):
@@ -919,7 +954,7 @@ class PokemonGBPage(QWidget):
             self,
             "Add BIOS",
             "",
-            "BIOS files (*.bin *.rom *.rom1 *.rom2 *.zip *.pce *.txt *.qcow2);;All files (*.*)",
+            "BIOS files (*.bin *.rom *.rom1 *.rom2 *.zip *.pce *.txt *.qcow2 *.lo);;All files (*.*)",
         )
         files = [Path(path) for path in paths if path]
         if not files:
@@ -949,6 +984,77 @@ class PokemonGBPage(QWidget):
             _ROM_FILTER.format(extra=extra_globs()),
         )
         self._add_roms(paths)
+
+    def _open_as_console(self) -> None:
+        systems = {system.name: system for system in OPTIONAL_CONSOLES}
+        name, accepted = QInputDialog.getItem(
+            self, "Open as console", "Console", sorted(systems), editable=False,
+        )
+        if not accepted:
+            return
+        system = systems[name]
+        globs = " ".join(f"*{suffix}" for suffix in system.open_suffixes)
+        if not system.full_path:
+            globs += " *.zip"
+        paths, _ = QFileDialog.getOpenFileNames(self, f"Open {system.name} games", "", f"Games ({globs})")
+        if not paths:
+            return
+        records = []
+        failures = []
+        for name in paths:
+            path = Path(name)
+            try:
+                source = locate_as(path, self._console_cache(path, system), system)
+                records.append((path, title_of(source.name), system.name, system.id))
+            except (OSError, ValueError, zipfile.BadZipFile, RuntimeError) as exc:
+                failures.append(f"{path.name}: {exc}")
+        try:
+            self.library.add_catalog(records, update_system=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "Open as console", str(exc))
+            return
+        self._show_library()
+        if failures:
+            QMessageBox.warning(self, "Open as console", "\n".join(failures[:8]))
+        if len(paths) == 1 and records:
+            self.load_path(paths[0])
+
+    @staticmethod
+    def _console_cache(path: Path, system: System) -> Path:
+        return _saves_dir() / "_cache" / game_id(path) / system.id
+
+    def _show_console_cores(self) -> None:
+        missing = {system.name: system for system in OPTIONAL_CONSOLES
+                   if not (cores_dir() / system.dll).is_file()}
+        if not missing:
+            QMessageBox.information(self, "Console cores", "All optional console cores are installed.")
+            return
+        if not can_install_windows_core():
+            QMessageBox.information(self, "Console cores", "Core downloads require 64-bit Windows on an x64 PC.")
+            return
+        name, accepted = QInputDialog.getItem(
+            self, "Console cores", "Install a Windows core from Libretro", sorted(missing), editable=False,
+        )
+        if not accepted:
+            return
+        progress = _CoreInstallProgress(self)
+        progress.setWindowTitle("Console cores")
+        progress.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        layout = QVBoxLayout(progress)
+        layout.addWidget(QLabel(f"Downloading {name} from Libretro…"))
+        bar = QProgressBar()
+        bar.setRange(0, 0)
+        layout.addWidget(bar)
+        worker = _CoreInstallWorker(missing[name], progress)
+        worker.finished.connect(progress.accept)
+        worker.start()
+        progress.exec()
+        worker.wait()
+        if worker.error:
+            QMessageBox.warning(self, "Console cores", worker.error)
+        else:
+            self.status.setText(f"{name} core installed. Open the game from the library.")
+        progress.deleteLater()
 
     def _add_roms(self, paths: list[str]) -> None:
         files = [Path(path) for path in paths if path]
@@ -1123,6 +1229,16 @@ class PokemonGBPage(QWidget):
             self._queued = None
 
     def _load_queued(self, file: Path) -> None:
+        game = self.library.by_path(file)
+        selected = OPTIONAL_BY_ID.get(game.system_id) if game is not None else None
+        if selected is not None:
+            try:
+                source = locate_as(file, self._console_cache(file, selected), selected)
+            except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
+                QMessageBox.warning(self, "Emulator", str(exc))
+                return
+            self._load_system(self._patched_file(source), selected, original=source)
+            return
         try:
             switch_path = prepare_switch(file)
         except Exception as exc:
