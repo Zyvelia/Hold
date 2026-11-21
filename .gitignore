@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+saves/
+*.sav
+*.srm
+*.rtc.json
+*.gba.state
+*.nds.state
+*.3ds.state
+*.switch.state
+cores/system/
